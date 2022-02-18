@@ -1,0 +1,49 @@
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <script>
+        const HTTP_PORT = 8080
+        const WS_PORT = 8081
+        let wss = new WebSocket('ws://localhost:' + WS_PORT)
+        wss.onmessage = function (e) {
+            let data = JSON.parse(e.data)
+            let row = '<tr>'
+            row += '<td>' + data[0] + '</td>'
+            row += '<td>' + data[1] + '</td>'
+            row += '<td>' + data[2] + '</td>'
+            row += '<td>' + data[3] + '</td>'
+            row += '<td>' + data[4] + '</td>'
+            row += '</tr>'
+            $('#tb').append(row)
+        }
+
+        $.ajax({
+            url: 'http://localhost:' + HTTP_PORT,
+            type: 'POST',
+            dataType: 'json',
+        }).then(
+            function (data) {
+                let elem = '<tr><th>ISBN</th><th>タイトル</th><th>著者</th><th>出版社</th><th>分類</th></tr>'
+
+                $.each(data, function (key, item) {
+                    elem += '<tr>'
+                    elem += '<td>' + item.isbn + '</td>'
+                    elem += '<td>' + item.title + '</td>'
+                    elem += '<td>' + item.creator + '</td>'
+                    elem += '<td>' + item.publisher + '</td>'
+                    elem += '<td>' + item.subject + '</td>'
+                    elem += '<tr>'
+                })
+
+                $('#tb').html(elem)
+            })
+    </script>
+    <title>蔵書リスト</title>
+</head>
+<body>
+<div class="container">
+    <table class="table table-striped table-dark" id="tb">
+    </table>
+</div>
+</body>
+</html>

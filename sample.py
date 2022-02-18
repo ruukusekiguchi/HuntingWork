@@ -1,26 +1,146 @@
-import requests
 import json
+import sqlite3
+import cv2
+import requests
+import winsound
+import threading
+import xml.etree.ElementTree as et
+from pyzbar.pyzbar import decode
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from websocket_server import WebsocketServer
 
-from datetime import datetime
 
-def uploadSensorValues(temp, hum, press):
+class OrenoServer:
+    def __init__(self):
+        self.HOST = 'localhost'
+        self.HTTP_PORT = 8080
+        self.WS_PORT = 8081
+        self.client = None
+        self.wss = WebsocketServer(host=self.HOST, port=self.WS_PORT)
+        self.wss.set_fn_new_client(self.new_client)
+        self.https = ThreadingHTTPServer((self.HOST, self.HTTP_PORT), HttpHandler)
 
-    url = 'http://yourdomain/subsub/sensvalues.php'
+    def start(self):
+        threading.Thread(target=self.wss.run_forever).start()
+        threading.Thread(target=self.https.serve_forever).start()
 
-    sensorsdata = {'datetime':datetime.now().strftime("%Y/%m/%d %H:%M:%S"),'temp':temp,'hum':hum,'press':press}
+    def shutdown(self):
+        self.wss.shutdown()
+        self.https.shutdown()
 
-    # print json.dumps(sensorsdata)
+    def new_client(self, client, server):
+        if self.client is None:
+            self.client = client
+            threading.Thread(target=self.cam_capture).start()
 
-    headers = {'content-type': 'application/json'}
+    def cam_capture(self):
+        cap = cv2.VideoCapture(1)
+        font = cv2.FONT_HERSHEY_SIMPLEX
+        barcodes = []
+        db = OrenoDataBase()
 
-    res = requests.post(url, data=json.dumps(sensorsdata), headers=headers, verify=False)
+        while cap.isOpened():
+            ret, frame = cap.read()
 
-    # print res.json()
-    pass
+            if ret:
+                d = decode(frame)
 
-def main():
+                if d:
+                    for barcode in d:
+                        barcode_data = barcode.data.decode('utf-8')
 
-    uploadSensorValues(21.8, 39.1, 1020)
+                        if self.is_isbn(barcode_data):
 
-if __name__ == '__main__':
-    main()
+                            if barcode_data not in barcodes:
+                                barcodes.append(barcode_data)
+
+                                winsound.Beep(2000, 50)
+                                font_color = (0, 0, 255)
+                                result = self.fetch_book_data(barcode_data)
+                                self.wss.send_message(self.client, json.dumps(result))
+                                db.set(result)
+                            else:
+                                font_color = (0, 154, 87)
+
+                            x, y, w, h = barcode.rect
+                            cv2.rectangle(frame, (x, y), (x + w, y + h), font_color, 2)
+                            frame = cv2.putText(frame, barcode_data, (x, y - 10), font, .5, font_color, 2, cv2.LINE_AA)
+
+            cv2.imshow('BARCODE READER Press Q -> Exit', frame)
+
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+        db.close()
+        cap.release()
+        self.shutdown()
+
+    def fetch_book_data(self, isbn):
+        endpoint = 'https://iss.ndl.go.jp/api/sru'
+        params = {'operation': 'searchRetrieve',
+                'query': f'isbn="{isbn}"',
+                'recordPacking': 'xml'}
+
+        res = requests.get(endpoint, params=params)
+        root = et.fromstring(res.text)
+        ns = {'dc': 'http://purl.org/dc/elements/1.1/'}
+        title = root.find('.//dc:title', ns).text
+        creator = root.find('.//dc:creator', ns).text
+        publisher = root.find('.//dc:publisher', ns).text
+        subject = root.find('.//dc:subject', ns).text
+
+        return isbn, title, creator, publisher, subject
+
+    def is_isbn(self, code):
+        return len(code) == 13 and code[:3] == '978'
+
+
+class OrenoDataBase:
+
+    def __init__(self):
+        self.conn = MySQLdb.connect(r'D:\bookshelf\isbn_ndl.sqlite')
+        self.conn.row_factory = sqlite3.Row
+        self.cur = self.conn.cursor()
+
+    def get(self):
+        self.cur.execute('SELECT * FROM ndl')
+        rows = []
+
+        for r in self.cur.fetchall():
+            rows.append({'isbn': r['isbn'], 'title': r['title'], 'creator': r['creator'], 'publisher': r['publisher'], 'subject': r['subject']})
+
+        return rows
+
+    def set(self, values):
+        place_holder = ','.join('?'*len(values))
+        self.cur.execute(f'INSERT INTO ndl VALUES ({place_holder})', values)
+        self.conn.commit()
+
+    def close(self):
+        self.cur.close()
+        self.conn.close()
+
+
+class HttpHandler(BaseHTTPRequestHandler):
+
+    def do_GET(self):
+        with open(r'D:\bookshelf\template.html', mode='r', encoding='utf-8') as html:
+            response_body = html.read()
+            self.send_response(200)
+            self.send_header('Content-type', 'text/html; charset=utf-8')
+            self.end_headers()
+            self.wfile.write(response_body.encode('utf-8'))
+
+    def do_POST(self):
+        db = OrenoDataBase()
+        rows = db.get()
+        self.send_response(200)
+        self.send_header('Content-type', 'application/json')
+        self.end_headers()
+        response_body = json.dumps(rows)
+        self.wfile.write(response_body.encode('utf-8'))
+        db.close()
+
+
+server = OrenoServer()
+server.start()
